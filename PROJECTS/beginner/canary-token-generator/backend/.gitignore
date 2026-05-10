@@ -1,4 +1,4 @@
-# AngelaMos | 2026
+# ©AngelaMos | 2026
 # .gitignore
 
 # Binaries
@@ -32,10 +32,6 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
-
-# Keys (sensitive)
-keys/*.pem
-keys/*.key
 
 # Vendor (if using)
 vendor/

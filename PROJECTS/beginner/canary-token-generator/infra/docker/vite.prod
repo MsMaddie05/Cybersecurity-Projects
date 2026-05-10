@@ -1,5 +1,5 @@
 # =============================================================================
-# AngelaMos | 2026
+# ©AngelaMos | 2026
 # vite.prod
 # =============================================================================
 # Production Dockerfile: builds Vite app, serves via Nginx
@@ -15,12 +15,12 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
 
-COPY react-scss/package.json react-scss/pnpm-lock.yaml* ./
+COPY frontend/package.json frontend/pnpm-lock.yaml* ./
 
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
-COPY react-scss/ .
+COPY frontend/ .
 
 ARG VITE_API_URL=/api
 ARG VITE_APP_TITLE="My App"

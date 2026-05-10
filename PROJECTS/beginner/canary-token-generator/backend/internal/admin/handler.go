@@ -1,4 +1,4 @@
-// AngelaMos | 2026
+// ©AngelaMos | 2026
 // handler.go
 
 package admin
@@ -15,16 +15,11 @@ import (
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/core"
 )
 
-type AuthService interface {
-	InvalidateAllSessions(ctx context.Context) error
-}
-
 type Handler struct {
 	dbStats    func() sql.DBStats
 	redisStats func() *redis.PoolStats
 	redisPing  func(ctx context.Context) error
 	dbPing     func(ctx context.Context) error
-	authSvc    AuthService
 }
 
 type HandlerConfig struct {
@@ -32,7 +27,6 @@ type HandlerConfig struct {
 	RedisStats func() *redis.PoolStats
 	RedisPing  func(ctx context.Context) error
 	DBPing     func(ctx context.Context) error
-	AuthSvc    AuthService
 }
 
 func NewHandler(cfg HandlerConfig) *Handler {
@@ -41,18 +35,11 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		redisStats: cfg.RedisStats,
 		redisPing:  cfg.RedisPing,
 		dbPing:     cfg.DBPing,
-		authSvc:    cfg.AuthSvc,
 	}
 }
 
-func (h *Handler) RegisterRoutes(
-	r chi.Router,
-	authenticator, adminOnly func(http.Handler) http.Handler,
-) {
+func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Route("/admin", func(r chi.Router) {
-		r.Use(authenticator)
-		r.Use(adminOnly)
-
 		r.Get("/stats", h.GetSystemStats)
 		r.Get("/stats/db", h.GetDatabaseStats)
 		r.Get("/stats/redis", h.GetRedisStats)

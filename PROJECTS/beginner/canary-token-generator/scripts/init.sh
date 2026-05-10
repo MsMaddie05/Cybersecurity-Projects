@@ -60,14 +60,14 @@ if [[ -n "$ACCT" && -n "$KEY" ]]; then
     if [[ ! -f "$MMDB_PATH" ]]; then
         mkdir -p "$DATA_DIR"
         echo "  downloading GeoLite2-City.mmdb from MaxMind..."
-        local_tmp="$(mktemp -d)"
-        trap 'rm -rf "$local_tmp"' EXIT
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
         if curl -sSf -u "$ACCT:$KEY" \
             "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz" \
-            -o "$local_tmp/geolite.tar.gz"; then
-            tar -xzf "$local_tmp/geolite.tar.gz" -C "$local_tmp" --strip-components=1 \
+            -o "$tmp_dir/geolite.tar.gz"; then
+            tar -xzf "$tmp_dir/geolite.tar.gz" -C "$tmp_dir" --strip-components=1 \
                 "*/GeoLite2-City.mmdb"
-            mv "$local_tmp/GeoLite2-City.mmdb" "$MMDB_PATH"
+            mv "$tmp_dir/GeoLite2-City.mmdb" "$MMDB_PATH"
             echo "  GeoLite2-City.mmdb downloaded to $MMDB_PATH"
         else
             echo "  Warning: GeoLite2 download failed (check MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY)" >&2
