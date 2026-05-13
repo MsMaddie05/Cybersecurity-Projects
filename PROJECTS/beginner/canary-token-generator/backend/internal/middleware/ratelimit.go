@@ -154,8 +154,9 @@ func writeRateLimitExceeded(w http.ResponseWriter, res *redis_rate.Result) {
 		},
 	}
 
-	//nolint:errcheck // best-effort response write
-	_ = json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		slog.Error("failed to encode rate-limit response", "error", err)
+	}
 }
 
 type limiterEntry struct {

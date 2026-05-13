@@ -6,6 +6,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -174,8 +175,9 @@ func (h *Handler) writeStatus(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.WriteHeader(status)
-	//nolint:errcheck // best-effort response
-	_ = json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Error("failed to encode health response", "error", err)
+	}
 }
 
 type StatusResponse struct {

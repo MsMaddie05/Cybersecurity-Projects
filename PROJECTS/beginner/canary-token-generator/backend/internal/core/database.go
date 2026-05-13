@@ -5,9 +5,11 @@ package core
 
 import (
 	"context"
+	crand "crypto/rand"
 	"database/sql"
 	"fmt"
-	"math/rand/v2"
+	"log/slog"
+	"math/big"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -41,9 +43,15 @@ func NewDatabase(
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := db.PingContext(pingCtx); err != nil {
-		_ = db.Close() //nolint:errcheck // cleanup on connection failure
-		return nil, fmt.Errorf("ping database: %w", err)
+	if pingErr := db.PingContext(pingCtx); pingErr != nil {
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, fmt.Errorf(
+				"ping database: %w (close also failed: %w)",
+				pingErr,
+				closeErr,
+			)
+		}
+		return nil, fmt.Errorf("ping database: %w", pingErr)
 	}
 
 	return &Database{DB: db}, nil
@@ -91,7 +99,12 @@ func InTx(ctx context.Context, db *sqlx.DB, fn func(tx *sqlx.Tx) error) error {
 
 	defer func() {
 		if p := recover(); p != nil {
-			_ = tx.Rollback() //nolint:errcheck // best-effort rollback on panic
+			if rbErr := tx.Rollback(); rbErr != nil {
+				slog.Error(
+					"rollback failed during panic recovery",
+					"error", rbErr,
+				)
+			}
 			panic(p)
 		}
 	}()
@@ -123,7 +136,12 @@ func InTxWithOptions(
 
 	defer func() {
 		if p := recover(); p != nil {
-			_ = tx.Rollback() //nolint:errcheck // best-effort rollback on panic
+			if rbErr := tx.Rollback(); rbErr != nil {
+				slog.Error(
+					"rollback failed during panic recovery",
+					"error", rbErr,
+				)
+			}
 			panic(p)
 		}
 	}()
@@ -143,7 +161,13 @@ func InTxWithOptions(
 }
 
 func jitteredDuration(base time.Duration) time.Duration {
-	//nolint:gosec // G404: non-security-sensitive jitter for connection pool
-	jitter := time.Duration(rand.Int64N(int64(base / 7)))
-	return base + jitter
+	maxJitter := int64(base / 7)
+	if maxJitter <= 0 {
+		return base
+	}
+	jitter, err := crand.Int(crand.Reader, big.NewInt(maxJitter))
+	if err != nil {
+		return base
+	}
+	return base + time.Duration(jitter.Int64())
 }
