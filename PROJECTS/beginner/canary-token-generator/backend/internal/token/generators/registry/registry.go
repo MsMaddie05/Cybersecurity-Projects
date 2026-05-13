@@ -9,6 +9,7 @@ import (
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/docx"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/envfile"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/kubeconfig"
+	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/mysql"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/pdf"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/slowredirect"
 	"github.com/CarterPerez-dev/cybersecurity-projects/canary-token-generator/backend/internal/token/generators/webbug"
@@ -28,5 +29,6 @@ func Build(_ Config) Registry {
 		token.TypePDF:          pdf.New(),
 		token.TypeKubeconfig:   kubeconfig.New(),
 		token.TypeEnvfile:      envfile.New(),
+		token.TypeMySQL:        mysql.New(),
 	}
 }
