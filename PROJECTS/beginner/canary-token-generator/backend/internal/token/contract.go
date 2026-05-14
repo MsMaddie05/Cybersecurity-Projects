@@ -50,3 +50,23 @@ type Generator interface {
 		r *http.Request,
 	) (*event.Event, *TriggerResponse, error)
 }
+
+func (t *Token) NotifyInfo() event.NotifyInfo {
+	return event.NotifyInfo{
+		TokenID:      t.ID,
+		ManageID:     t.ManageID,
+		Type:         string(t.Type),
+		Memo:         t.Memo,
+		AlertChannel: string(t.AlertChannel),
+		TelegramBot:  derefString(t.TelegramBot),
+		TelegramChat: derefString(t.TelegramChat),
+		WebhookURL:   derefString(t.WebhookURL),
+	}
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
