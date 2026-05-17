@@ -42,18 +42,19 @@ func SecurityHeaders(isProduction bool) func(http.Handler) http.Handler {
 func buildCSP(isProduction bool) string {
 	directives := []string{
 		"default-src 'self'",
-		"script-src 'self'",
+		"script-src 'self' https://challenges.cloudflare.com",
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data: https:",
 		"font-src 'self'",
-		"connect-src 'self'",
+		"connect-src 'self' https://challenges.cloudflare.com",
+		"frame-src https://challenges.cloudflare.com",
 		"frame-ancestors 'none'",
 		"base-uri 'self'",
 		"form-action 'self'",
 	}
 
 	if !isProduction {
-		directives[1] = "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+		directives[1] = "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com"
 	}
 
 	return strings.Join(directives, "; ")
