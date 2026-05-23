@@ -15,13 +15,18 @@ const (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	client := &http.Client{Timeout: httpDialTO}
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		os.Exit(1)
+		return 1
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck // healthcheck binary; close error not actionable
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
