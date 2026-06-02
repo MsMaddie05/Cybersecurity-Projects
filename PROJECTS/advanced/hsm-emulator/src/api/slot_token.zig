@@ -139,6 +139,11 @@ pub fn C_GetMechanismInfo(slotID: ck.CK_SLOT_ID, mechType: ck.CK_MECHANISM_TYPE,
             .ulMaxKeySize = config.aes_max_key_bytes,
             .flags = ck.CKF_ENCRYPT | ck.CKF_DECRYPT,
         },
+        ck.CKM_AES_KEY_WRAP => .{
+            .ulMinKeySize = config.aes_min_key_bytes,
+            .ulMaxKeySize = config.aes_max_key_bytes,
+            .flags = ck.CKF_WRAP | ck.CKF_UNWRAP,
+        },
         ck.CKM_EC_KEY_PAIR_GEN => .{
             .ulMinKeySize = config.ec_min_key_bits,
             .ulMaxKeySize = config.ec_max_key_bits,
@@ -148,6 +153,11 @@ pub fn C_GetMechanismInfo(slotID: ck.CK_SLOT_ID, mechType: ck.CK_MECHANISM_TYPE,
             .ulMinKeySize = config.ec_min_key_bits,
             .ulMaxKeySize = config.ec_max_key_bits,
             .flags = ck.CKF_SIGN | ck.CKF_VERIFY | ck.CKF_EC_NAMEDCURVE,
+        },
+        ck.CKM_ECDH1_DERIVE => .{
+            .ulMinKeySize = config.ec_min_key_bits,
+            .ulMaxKeySize = config.ec_max_key_bits,
+            .flags = ck.CKF_DERIVE | ck.CKF_EC_NAMEDCURVE,
         },
         ck.CKM_RSA_PKCS_KEY_PAIR_GEN => .{
             .ulMinKeySize = config.rsa_min_key_bits,
@@ -167,7 +177,7 @@ pub fn C_GetMechanismInfo(slotID: ck.CK_SLOT_ID, mechType: ck.CK_MECHANISM_TYPE,
         ck.CKM_RSA_PKCS_OAEP => .{
             .ulMinKeySize = config.rsa_min_key_bits,
             .ulMaxKeySize = config.rsa_max_key_bits,
-            .flags = ck.CKF_ENCRYPT | ck.CKF_DECRYPT,
+            .flags = ck.CKF_ENCRYPT | ck.CKF_DECRYPT | ck.CKF_WRAP | ck.CKF_UNWRAP,
         },
         else => return ck.CKR_MECHANISM_INVALID,
     };

@@ -308,6 +308,25 @@ fn verifyImpl(comptime Scheme: type, point: []const u8, prehash: []const u8, sig
     return .ok;
 }
 
+pub fn ecdh(curve: Curve, scalar: []const u8, peer_point_sec1: []const u8, out: []u8) Error!usize {
+    return switch (curve) {
+        .p256 => ecdhImpl(std.crypto.ecc.P256, 32, scalar, peer_point_sec1, out),
+        .p384 => ecdhImpl(std.crypto.ecc.P384, 48, scalar, peer_point_sec1, out),
+    };
+}
+
+fn ecdhImpl(comptime Pt: type, comptime n: usize, scalar: []const u8, peer_point_sec1: []const u8, out: []u8) Error!usize {
+    if (scalar.len != n or out.len < n) return Error.Crypto;
+    const peer = Pt.fromSec1(peer_point_sec1) catch return Error.Crypto;
+    var s: [n]u8 = undefined;
+    defer std.crypto.secureZero(u8, &s);
+    @memcpy(&s, scalar[0..n]);
+    const shared = peer.mul(s, .big) catch return Error.Crypto;
+    const xb = shared.affineCoordinates().x.toBytes(.big);
+    @memcpy(out[0..n], xb[0..n]);
+    return n;
+}
+
 fn hexToBytes(comptime hex: []const u8) [hex.len / 2]u8 {
     var out: [hex.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, hex) catch unreachable;
@@ -404,6 +423,33 @@ test "wrong-length signature reports len_range" {
     var v = VerifyState.init(.p256, ck.CKM_ECDSA_SHA256, km.pointBytes()).?;
     v.update("data");
     try std.testing.expectEqual(VerifyResult.len_range, v.finalVerify(&[_]u8{0} ** 63));
+}
+
+test "ECDH P-256 shared secret agrees on both sides and rejects a bad point" {
+    const io = std.testing.io;
+    const a = try generate(io, .p256);
+    const b = try generate(io, .p256);
+    var sa: [max_scalar]u8 = undefined;
+    var sb: [max_scalar]u8 = undefined;
+    const na = try ecdh(.p256, a.scalarBytes(), b.pointBytes(), &sa);
+    const nb = try ecdh(.p256, b.scalarBytes(), a.pointBytes(), &sb);
+    try std.testing.expectEqual(@as(usize, 32), na);
+    try std.testing.expectEqualSlices(u8, sa[0..na], sb[0..nb]);
+
+    const bad = [_]u8{0x04} ++ [_]u8{0xff} ** 64;
+    try std.testing.expectError(Error.Crypto, ecdh(.p256, a.scalarBytes(), &bad, &sa));
+}
+
+test "ECDH P-384 shared secret agrees on both sides" {
+    const io = std.testing.io;
+    const a = try generate(io, .p384);
+    const b = try generate(io, .p384);
+    var sa: [max_scalar]u8 = undefined;
+    var sb: [max_scalar]u8 = undefined;
+    const na = try ecdh(.p384, a.scalarBytes(), b.pointBytes(), &sa);
+    const nb = try ecdh(.p384, b.scalarBytes(), a.pointBytes(), &sb);
+    try std.testing.expectEqual(@as(usize, 48), na);
+    try std.testing.expectEqualSlices(u8, sa[0..na], sb[0..nb]);
 }
 
 test "curve OID mapping and EC point DER round-trip" {

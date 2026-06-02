@@ -80,10 +80,12 @@ pub const supported_mechanisms = [_]ck.CK_MECHANISM_TYPE{
     ck.CKM_EC_KEY_PAIR_GEN,
     ck.CKM_ECDSA,
     ck.CKM_ECDSA_SHA256,
+    ck.CKM_ECDH1_DERIVE,
     ck.CKM_RSA_PKCS_KEY_PAIR_GEN,
     ck.CKM_RSA_PKCS,
     ck.CKM_SHA256_RSA_PKCS,
     ck.CKM_RSA_PKCS_PSS,
     ck.CKM_SHA256_RSA_PKCS_PSS,
     ck.CKM_RSA_PKCS_OAEP,
+    ck.CKM_AES_KEY_WRAP,
 };

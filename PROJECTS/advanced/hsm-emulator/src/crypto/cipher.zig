@@ -199,6 +199,89 @@ pub fn decryptOutLen(mode: Mode, in_len: usize) usize {
     };
 }
 
+pub const WrapError = error{ KeySize, DataLen, Integrity };
+
+pub const key_wrap_overhead = 8;
+
+const key_wrap_iv = [8]u8{ 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6 };
+
+fn xorCounter(a: *[8]u8, t: u64) void {
+    var tb: [8]u8 = undefined;
+    std.mem.writeInt(u64, &tb, t, .big);
+    for (a, tb) |*x, y| x.* ^= y;
+}
+
+pub fn aesKeyWrap(kek: []const u8, plain: []const u8, out: []u8) WrapError!usize {
+    if (kek.len != config.aes_min_key_bytes and kek.len != config.aes_max_key_bytes) return WrapError.KeySize;
+    if (plain.len < 2 * key_wrap_overhead or plain.len % key_wrap_overhead != 0) return WrapError.DataLen;
+    std.debug.assert(out.len >= plain.len + key_wrap_overhead);
+    const n = plain.len / key_wrap_overhead;
+    @memcpy(out[key_wrap_overhead..][0..plain.len], plain);
+    const r = out[key_wrap_overhead..][0..plain.len];
+    var a: [8]u8 = key_wrap_iv;
+    var blk: [block]u8 = undefined;
+    var enc: [block]u8 = undefined;
+    defer {
+        std.crypto.secureZero(u8, &a);
+        std.crypto.secureZero(u8, &blk);
+        std.crypto.secureZero(u8, &enc);
+    }
+    var j: usize = 0;
+    while (j < 6) : (j += 1) {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            @memcpy(blk[0..8], &a);
+            @memcpy(blk[8..16], r[i * 8 ..][0..8]);
+            encBlockRaw(kek, &blk, &enc);
+            @memcpy(&a, enc[0..8]);
+            xorCounter(&a, n * j + i + 1);
+            @memcpy(r[i * 8 ..][0..8], enc[8..16]);
+        }
+    }
+    @memcpy(out[0..8], &a);
+    return plain.len + key_wrap_overhead;
+}
+
+pub fn aesKeyUnwrap(kek: []const u8, wrapped: []const u8, out: []u8) WrapError!usize {
+    if (kek.len != config.aes_min_key_bytes and kek.len != config.aes_max_key_bytes) return WrapError.KeySize;
+    if (wrapped.len < 3 * key_wrap_overhead or wrapped.len % key_wrap_overhead != 0) return WrapError.DataLen;
+    const n = wrapped.len / key_wrap_overhead - 1;
+    const plain_len = n * key_wrap_overhead;
+    std.debug.assert(out.len >= plain_len);
+    @memcpy(out[0..plain_len], wrapped[key_wrap_overhead..][0..plain_len]);
+    const r = out[0..plain_len];
+    var a: [8]u8 = undefined;
+    @memcpy(&a, wrapped[0..8]);
+    var blk: [block]u8 = undefined;
+    var dec: [block]u8 = undefined;
+    defer {
+        std.crypto.secureZero(u8, &a);
+        std.crypto.secureZero(u8, &blk);
+        std.crypto.secureZero(u8, &dec);
+    }
+    var j: usize = 6;
+    while (j > 0) {
+        j -= 1;
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            xorCounter(&a, n * j + i + 1);
+            @memcpy(blk[0..8], &a);
+            @memcpy(blk[8..16], r[i * 8 ..][0..8]);
+            decBlockRaw(kek, &blk, &dec);
+            @memcpy(&a, dec[0..8]);
+            @memcpy(r[i * 8 ..][0..8], dec[8..16]);
+        }
+    }
+    var diff: u8 = 0;
+    for (a, key_wrap_iv) |x, y| diff |= x ^ y;
+    if (diff != 0) {
+        std.crypto.secureZero(u8, out[0..plain_len]);
+        return WrapError.Integrity;
+    }
+    return plain_len;
+}
+
 fn testKey() [32]u8 {
     var k: [32]u8 = undefined;
     for (0..32) |j| k[j] = @intCast(j);
@@ -299,4 +382,47 @@ test "GCM round-trips and rejects a tampered tag" {
     d2.key_buf = key;
     d2.iv = [_]u8{7} ** 12;
     try std.testing.expectError(Error.EncryptedDataInvalid, d2.gcmDecrypt(ct[0..cn], &back));
+}
+
+test "AES-128 key wrap matches the RFC 3394 section 4.1 KAT and unwraps" {
+    const kek = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
+    const plain = [_]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff };
+    const expect = [_]u8{ 0x1f, 0xa6, 0x8b, 0x0a, 0x81, 0x12, 0xb4, 0x47, 0xae, 0xf3, 0x4b, 0xd8, 0xfb, 0x5a, 0x7b, 0x82, 0x9d, 0x3e, 0x86, 0x23, 0x71, 0xd2, 0xcf, 0xe5 };
+
+    var out: [24]u8 = undefined;
+    const n = try aesKeyWrap(&kek, &plain, &out);
+    try std.testing.expectEqual(@as(usize, 24), n);
+    try std.testing.expectEqualSlices(u8, &expect, &out);
+
+    var back: [16]u8 = undefined;
+    const m = try aesKeyUnwrap(&kek, &out, &back);
+    try std.testing.expectEqual(@as(usize, 16), m);
+    try std.testing.expectEqualSlices(u8, &plain, &back);
+}
+
+test "AES-256 key wrap round-trips 256-bit key material and rejects tampering" {
+    const kek = testKey();
+    var plain: [32]u8 = undefined;
+    for (0..32) |k| plain[k] = @intCast((k * 11) & 0xff);
+
+    var wrapped: [40]u8 = undefined;
+    const n = try aesKeyWrap(&kek, &plain, &wrapped);
+    try std.testing.expectEqual(@as(usize, 40), n);
+
+    var back: [32]u8 = undefined;
+    const m = try aesKeyUnwrap(&kek, &wrapped, &back);
+    try std.testing.expectEqual(@as(usize, 32), m);
+    try std.testing.expectEqualSlices(u8, &plain, &back);
+
+    wrapped[3] ^= 0x01;
+    try std.testing.expectError(WrapError.Integrity, aesKeyUnwrap(&kek, &wrapped, &back));
+}
+
+test "AES key wrap rejects bad input and KEK lengths" {
+    const kek = testKey();
+    var out: [64]u8 = undefined;
+    try std.testing.expectError(WrapError.DataLen, aesKeyWrap(&kek, &[_]u8{0} ** 8, &out));
+    try std.testing.expectError(WrapError.DataLen, aesKeyWrap(&kek, &[_]u8{0} ** 20, &out));
+    try std.testing.expectError(WrapError.DataLen, aesKeyUnwrap(&kek, &[_]u8{0} ** 16, &out));
+    try std.testing.expectError(WrapError.KeySize, aesKeyWrap(&[_]u8{0} ** 24, &[_]u8{0} ** 16, &out));
 }

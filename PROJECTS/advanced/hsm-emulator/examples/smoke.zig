@@ -357,6 +357,141 @@ pub fn main() !void {
     };
     if (f.C_GetAttributeValue.?(h, h_rsapriv, &rsaval_q, rsaval_q.len) != ck.CKR_ATTRIBUTE_SENSITIVE) return error.RsaPrivNotSensitive;
 
+    var ecdh_kpgen = ck.CK_MECHANISM{ .mechanism = ck.CKM_EC_KEY_PAIR_GEN, .pParameter = null, .ulParameterLen = 0 };
+    var derive_pub_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_EC_PARAMS, .pValue = &ec_params, .ulValueLen = ec_params.len },
+    };
+    var derive_priv_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_DERIVE, .pValue = &ck_yes, .ulValueLen = 1 },
+        .{ .type = ck.CKA_PRIVATE, .pValue = &ck_false, .ulValueLen = 1 },
+    };
+    var h_pubA: ck.CK_OBJECT_HANDLE = 0;
+    var h_privA: ck.CK_OBJECT_HANDLE = 0;
+    var h_pubB: ck.CK_OBJECT_HANDLE = 0;
+    var h_privB: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_GenerateKeyPair(ECDH A)", f.C_GenerateKeyPair.?(h, &ecdh_kpgen, &derive_pub_tmpl, derive_pub_tmpl.len, &derive_priv_tmpl, derive_priv_tmpl.len, &h_pubA, &h_privA));
+    try check("C_GenerateKeyPair(ECDH B)", f.C_GenerateKeyPair.?(h, &ecdh_kpgen, &derive_pub_tmpl, derive_pub_tmpl.len, &derive_priv_tmpl, derive_priv_tmpl.len, &h_pubB, &h_privB));
+
+    var ptA: [67]u8 = undefined;
+    var ptB: [67]u8 = undefined;
+    var ptA_q = [_]ck.CK_ATTRIBUTE{.{ .type = ck.CKA_EC_POINT, .pValue = &ptA, .ulValueLen = ptA.len }};
+    var ptB_q = [_]ck.CK_ATTRIBUTE{.{ .type = ck.CKA_EC_POINT, .pValue = &ptB, .ulValueLen = ptB.len }};
+    try check("C_GetAttributeValue(EC_POINT A)", f.C_GetAttributeValue.?(h, h_pubA, &ptA_q, ptA_q.len));
+    try check("C_GetAttributeValue(EC_POINT B)", f.C_GetAttributeValue.?(h, h_pubB, &ptB_q, ptB_q.len));
+
+    var derive_value_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_CLASS, .pValue = &class_secret, .ulValueLen = @sizeOf(ck.CK_OBJECT_CLASS) },
+        .{ .type = ck.CKA_KEY_TYPE, .pValue = &kt_generic, .ulValueLen = @sizeOf(ck.CK_KEY_TYPE) },
+        .{ .type = ck.CKA_SENSITIVE, .pValue = &ck_false, .ulValueLen = 1 },
+        .{ .type = ck.CKA_EXTRACTABLE, .pValue = &ck_yes, .ulValueLen = 1 },
+    };
+    const lenB: usize = @intCast(ptB_q[0].ulValueLen);
+    const ptB_raw = ptB[2..lenB];
+    var paramsA = ck.CK_ECDH1_DERIVE_PARAMS{ .kdf = ck.CKD_NULL, .ulSharedDataLen = 0, .pSharedData = null, .ulPublicDataLen = ptB_raw.len, .pPublicData = ptB_raw.ptr };
+    var paramsB = ck.CK_ECDH1_DERIVE_PARAMS{ .kdf = ck.CKD_NULL, .ulSharedDataLen = 0, .pSharedData = null, .ulPublicDataLen = ptA_q[0].ulValueLen, .pPublicData = &ptA };
+    var ecdh_mechA = ck.CK_MECHANISM{ .mechanism = ck.CKM_ECDH1_DERIVE, .pParameter = &paramsA, .ulParameterLen = @sizeOf(ck.CK_ECDH1_DERIVE_PARAMS) };
+    var ecdh_mechB = ck.CK_MECHANISM{ .mechanism = ck.CKM_ECDH1_DERIVE, .pParameter = &paramsB, .ulParameterLen = @sizeOf(ck.CK_ECDH1_DERIVE_PARAMS) };
+    var h_secretA: ck.CK_OBJECT_HANDLE = 0;
+    var h_secretB: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_DeriveKey(A uses raw peer point)", f.C_DeriveKey.?(h, &ecdh_mechA, h_privA, &derive_value_tmpl, derive_value_tmpl.len, &h_secretA));
+    try check("C_DeriveKey(B uses DER peer point)", f.C_DeriveKey.?(h, &ecdh_mechB, h_privB, &derive_value_tmpl, derive_value_tmpl.len, &h_secretB));
+
+    var dvA: [48]u8 = undefined;
+    var dvB: [48]u8 = undefined;
+    var dvA_q = [_]ck.CK_ATTRIBUTE{.{ .type = ck.CKA_VALUE, .pValue = &dvA, .ulValueLen = dvA.len }};
+    var dvB_q = [_]ck.CK_ATTRIBUTE{.{ .type = ck.CKA_VALUE, .pValue = &dvB, .ulValueLen = dvB.len }};
+    try check("C_GetAttributeValue(derived A)", f.C_GetAttributeValue.?(h, h_secretA, &dvA_q, dvA_q.len));
+    try check("C_GetAttributeValue(derived B)", f.C_GetAttributeValue.?(h, h_secretB, &dvB_q, dvB_q.len));
+    if (dvA_q[0].ulValueLen != 32 or dvB_q[0].ulValueLen != 32) return error.DerivedLenWrong;
+    if (!std.mem.eql(u8, dvA[0..32], dvB[0..32])) return error.EcdhDisagree;
+
+    var kek_val: [32]u8 = undefined;
+    for (0..32) |j| kek_val[j] = @intCast(0xA0 + j);
+    var kek_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_CLASS, .pValue = &class_secret, .ulValueLen = @sizeOf(ck.CK_OBJECT_CLASS) },
+        .{ .type = ck.CKA_KEY_TYPE, .pValue = &kt_aes, .ulValueLen = @sizeOf(ck.CK_KEY_TYPE) },
+        .{ .type = ck.CKA_VALUE, .pValue = &kek_val, .ulValueLen = kek_val.len },
+        .{ .type = ck.CKA_WRAP, .pValue = &ck_yes, .ulValueLen = 1 },
+        .{ .type = ck.CKA_UNWRAP, .pValue = &ck_yes, .ulValueLen = 1 },
+    };
+    var h_kek: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_CreateObject(KEK)", f.C_CreateObject.?(h, &kek_tmpl, kek_tmpl.len, &h_kek));
+
+    var target_val = "0123456789abcdef".*;
+    var target_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_CLASS, .pValue = &class_secret, .ulValueLen = @sizeOf(ck.CK_OBJECT_CLASS) },
+        .{ .type = ck.CKA_KEY_TYPE, .pValue = &kt_aes, .ulValueLen = @sizeOf(ck.CK_KEY_TYPE) },
+        .{ .type = ck.CKA_VALUE, .pValue = &target_val, .ulValueLen = target_val.len },
+        .{ .type = ck.CKA_EXTRACTABLE, .pValue = &ck_yes, .ulValueLen = 1 },
+        .{ .type = ck.CKA_SENSITIVE, .pValue = &ck_false, .ulValueLen = 1 },
+    };
+    var h_target: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_CreateObject(wrap target)", f.C_CreateObject.?(h, &target_tmpl, target_tmpl.len, &h_target));
+
+    var keywrap_mech = ck.CK_MECHANISM{ .mechanism = ck.CKM_AES_KEY_WRAP, .pParameter = null, .ulParameterLen = 0 };
+    var wsize: ck.CK_ULONG = 0;
+    try check("C_WrapKey(size)", f.C_WrapKey.?(h, &keywrap_mech, h_kek, h_target, null, &wsize));
+    if (wsize != target_val.len + 8) return error.WrapSizeWrong;
+    var wrapped: [64]u8 = undefined;
+    var wrappedlen: ck.CK_ULONG = wrapped.len;
+    try check("C_WrapKey", f.C_WrapKey.?(h, &keywrap_mech, h_kek, h_target, &wrapped, &wrappedlen));
+    if (wrappedlen != target_val.len + 8) return error.WrapLenWrong;
+
+    var unwrap_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_CLASS, .pValue = &class_secret, .ulValueLen = @sizeOf(ck.CK_OBJECT_CLASS) },
+        .{ .type = ck.CKA_KEY_TYPE, .pValue = &kt_aes, .ulValueLen = @sizeOf(ck.CK_KEY_TYPE) },
+        .{ .type = ck.CKA_EXTRACTABLE, .pValue = &ck_yes, .ulValueLen = 1 },
+        .{ .type = ck.CKA_SENSITIVE, .pValue = &ck_false, .ulValueLen = 1 },
+    };
+    var h_unwrapped: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_UnwrapKey", f.C_UnwrapKey.?(h, &keywrap_mech, h_kek, &wrapped, wrappedlen, &unwrap_tmpl, unwrap_tmpl.len, &h_unwrapped));
+
+    var uwval: [32]u8 = undefined;
+    var uwval_q = [_]ck.CK_ATTRIBUTE{.{ .type = ck.CKA_VALUE, .pValue = &uwval, .ulValueLen = uwval.len }};
+    try check("C_GetAttributeValue(unwrapped)", f.C_GetAttributeValue.?(h, h_unwrapped, &uwval_q, uwval_q.len));
+    const uwlen: usize = @intCast(uwval_q[0].ulValueLen);
+    if (uwlen != target_val.len or !std.mem.eql(u8, uwval[0..uwlen], &target_val)) return error.UnwrapMismatch;
+
+    var wrapped2: [64]u8 = undefined;
+    var wrapped2len: ck.CK_ULONG = wrapped2.len;
+    if (f.C_WrapKey.?(h, &keywrap_mech, h_kek, h_gen, &wrapped2, &wrapped2len) != ck.CKR_KEY_UNEXTRACTABLE) return error.UnextractableWrapNotRejected;
+
+    var oaep_params = ck.CK_RSA_PKCS_OAEP_PARAMS{ .hashAlg = ck.CKM_SHA256, .mgf = ck.CKG_MGF1_SHA256, .source = ck.CKZ_DATA_SPECIFIED, .pSourceData = null, .ulSourceDataLen = 0 };
+    var oaep_wrap_mech = ck.CK_MECHANISM{ .mechanism = ck.CKM_RSA_PKCS_OAEP, .pParameter = &oaep_params, .ulParameterLen = @sizeOf(ck.CK_RSA_PKCS_OAEP_PARAMS) };
+    var rsawrapped: [256]u8 = undefined;
+    var rsawrappedlen: ck.CK_ULONG = rsawrapped.len;
+    try check("C_WrapKey(RSA-OAEP)", f.C_WrapKey.?(h, &oaep_wrap_mech, h_rsapub, h_target, &rsawrapped, &rsawrappedlen));
+    if (rsawrappedlen != 256) return error.RsaWrapLenWrong;
+    var h_rsaunwrapped: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_UnwrapKey(RSA-OAEP)", f.C_UnwrapKey.?(h, &oaep_wrap_mech, h_rsapriv, &rsawrapped, rsawrappedlen, &unwrap_tmpl, unwrap_tmpl.len, &h_rsaunwrapped));
+    var ruwval: [32]u8 = undefined;
+    var ruwval_q = [_]ck.CK_ATTRIBUTE{.{ .type = ck.CKA_VALUE, .pValue = &ruwval, .ulValueLen = ruwval.len }};
+    try check("C_GetAttributeValue(rsa-unwrapped)", f.C_GetAttributeValue.?(h, h_rsaunwrapped, &ruwval_q, ruwval_q.len));
+    const ruwlen: usize = @intCast(ruwval_q[0].ulValueLen);
+    if (ruwlen != target_val.len or !std.mem.eql(u8, ruwval[0..ruwlen], &target_val)) return error.RsaUnwrapMismatch;
+
+    var dk_val = "digest-this-key!".*;
+    var dk_tmpl = [_]ck.CK_ATTRIBUTE{
+        .{ .type = ck.CKA_CLASS, .pValue = &class_secret, .ulValueLen = @sizeOf(ck.CK_OBJECT_CLASS) },
+        .{ .type = ck.CKA_KEY_TYPE, .pValue = &kt_generic, .ulValueLen = @sizeOf(ck.CK_KEY_TYPE) },
+        .{ .type = ck.CKA_VALUE, .pValue = &dk_val, .ulValueLen = dk_val.len },
+    };
+    var h_dk: ck.CK_OBJECT_HANDLE = 0;
+    try check("C_CreateObject(digestkey)", f.C_CreateObject.?(h, &dk_tmpl, dk_tmpl.len, &h_dk));
+
+    var dk_mech = ck.CK_MECHANISM{ .mechanism = ck.CKM_SHA256, .pParameter = null, .ulParameterLen = 0 };
+    var dk_d1: [32]u8 = undefined;
+    var dk_d1len: ck.CK_ULONG = dk_d1.len;
+    try check("C_DigestInit(key)", f.C_DigestInit.?(h, &dk_mech));
+    try check("C_DigestKey", f.C_DigestKey.?(h, h_dk));
+    try check("C_DigestFinal(key)", f.C_DigestFinal.?(h, &dk_d1, &dk_d1len));
+
+    var dk_d2: [32]u8 = undefined;
+    var dk_d2len: ck.CK_ULONG = dk_d2.len;
+    try check("C_DigestInit(value)", f.C_DigestInit.?(h, &dk_mech));
+    try check("C_Digest(value)", f.C_Digest.?(h, &dk_val, dk_val.len, &dk_d2, &dk_d2len));
+    if (dk_d1len != 32 or !std.mem.eql(u8, dk_d1[0..32], dk_d2[0..32])) return error.DigestKeyMismatch;
+
     try check("C_CloseSession", f.C_CloseSession.?(h));
     try check("C_Finalize", f.C_Finalize.?(null));
 
@@ -372,6 +507,9 @@ pub fn main() !void {
     std.debug.print("  keygen          = C_GenerateKey AES OK; generated key CKA_VALUE is sensitive (unextractable)\n", .{});
     std.debug.print("  ecdsa           = C_GenerateKeyPair EC P-256 OK; ECDSA-SHA256 sign/verify (+tamper) OK; priv scalar sensitive\n", .{});
     std.debug.print("  rsa             = C_GenerateKeyPair RSA-2048 OK; SHA256-RSA-PKCS sign/verify (+tamper) + RSA-PKCS enc/dec OK; priv sensitive\n", .{});
+    std.debug.print("  derive          = C_DeriveKey ECDH1 P-256: both parties agree (raw + DER-wrapped peer point)\n", .{});
+    std.debug.print("  keywrap         = C_WrapKey/C_UnwrapKey AES-KEY-WRAP + RSA-OAEP round-trips; unextractable target refused\n", .{});
+    std.debug.print("  digestkey       = C_DigestKey digest equals C_Digest of the same key bytes\n", .{});
 }
 
 fn check(name: []const u8, rv: ck.CK_RV) !void {

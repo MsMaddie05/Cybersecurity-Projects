@@ -5,10 +5,12 @@ const std = @import("std");
 const ck = @import("../ck.zig");
 const config = @import("../config.zig");
 const state = @import("../core/state.zig");
+const session = @import("../core/session.zig");
 const object_store = @import("../core/object_store.zig");
 const object = @import("object.zig");
 const ecdsa = @import("../crypto/ecdsa.zig");
 const rsa = @import("../crypto/rsa.zig");
+const cipher = @import("../crypto/cipher.zig");
 
 const Object = object_store.Object;
 
@@ -217,14 +219,333 @@ pub fn C_GenerateKeyPair(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECH
     return ck.CKR_OK;
 }
 
-pub fn C_WrapKey(_: ck.CK_SESSION_HANDLE, _: *ck.CK_MECHANISM, _: ck.CK_OBJECT_HANDLE, _: ck.CK_OBJECT_HANDLE, _: ?[*]ck.CK_BYTE, _: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+fn buildSecretKeyObject(
+    inst: *state.Instance,
+    sess: *session.Session,
+    template: []const ck.CK_ATTRIBUTE,
+    value: []const u8,
+    base_always_sensitive: bool,
+    base_never_extractable: bool,
+    phKey: *ck.CK_OBJECT_HANDLE,
+) ck.CK_RV {
+    const allocator = inst.allocator();
+    var obj: Object = .{};
+    var moved = false;
+    defer if (!moved) obj.deinit(allocator);
+
+    for (template) |a| {
+        if (a.type == ck.CKA_VALUE_LEN or a.type == ck.CKA_VALUE) continue;
+        obj.set(allocator, a.type, attrBytes(a)) catch |e| return object_store.mapSetErr(e);
+    }
+
+    if (!obj.has(ck.CKA_CLASS)) {
+        const cls: ck.CK_OBJECT_CLASS = ck.CKO_SECRET_KEY;
+        obj.set(allocator, ck.CKA_CLASS, std.mem.asBytes(&cls)) catch |e| return object_store.mapSetErr(e);
+    }
+    if (!obj.has(ck.CKA_KEY_TYPE)) {
+        const kt: ck.CK_KEY_TYPE = ck.CKK_GENERIC_SECRET;
+        obj.set(allocator, ck.CKA_KEY_TYPE, std.mem.asBytes(&kt)) catch |e| return object_store.mapSetErr(e);
+    }
+    obj.set(allocator, ck.CKA_VALUE, value) catch |e| return object_store.mapSetErr(e);
+    obj.set(allocator, ck.CKA_LOCAL, &[_]u8{ck.CK_FALSE}) catch |e| return object_store.mapSetErr(e);
+
+    if (!obj.has(ck.CKA_SENSITIVE)) obj.set(allocator, ck.CKA_SENSITIVE, &[_]u8{ck.CK_TRUE}) catch |e| return object_store.mapSetErr(e);
+    if (!obj.has(ck.CKA_EXTRACTABLE)) obj.set(allocator, ck.CKA_EXTRACTABLE, &[_]u8{ck.CK_FALSE}) catch |e| return object_store.mapSetErr(e);
+    const always_sensitive: u8 = if (obj.getBool(ck.CKA_SENSITIVE) and base_always_sensitive) ck.CK_TRUE else ck.CK_FALSE;
+    const never_extractable: u8 = if (!obj.getBool(ck.CKA_EXTRACTABLE) and base_never_extractable) ck.CK_TRUE else ck.CK_FALSE;
+    obj.set(allocator, ck.CKA_ALWAYS_SENSITIVE, &[_]u8{always_sensitive}) catch |e| return object_store.mapSetErr(e);
+    obj.set(allocator, ck.CKA_NEVER_EXTRACTABLE, &[_]u8{never_extractable}) catch |e| return object_store.mapSetErr(e);
+
+    object.materializeDefaults(&obj, allocator, ck.CKO_SECRET_KEY) catch |e| return object_store.mapSetErr(e);
+
+    moved = true;
+    return object.insertNew(inst, sess, obj, phKey);
 }
 
-pub fn C_UnwrapKey(_: ck.CK_SESSION_HANDLE, _: *ck.CK_MECHANISM, _: ck.CK_OBJECT_HANDLE, _: [*]ck.CK_BYTE, _: ck.CK_ULONG, _: [*]ck.CK_ATTRIBUTE, _: ck.CK_ULONG, _: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+const SecretVal = union(enum) {
+    ok: []const u8,
+    err: ck.CK_RV,
+};
+
+fn wrapTargetValue(inst: *state.Instance, hKey: ck.CK_OBJECT_HANDLE) SecretVal {
+    const obj = inst.objects.getPtr(hKey) orelse return .{ .err = ck.CKR_KEY_HANDLE_INVALID };
+    if (!object_store.visible(obj, inst.logged_in)) return .{ .err = ck.CKR_KEY_HANDLE_INVALID };
+    if (classOf(obj) != ck.CKO_SECRET_KEY) return .{ .err = ck.CKR_KEY_NOT_WRAPPABLE };
+    if (obj.has(ck.CKA_EXTRACTABLE) and !obj.getBool(ck.CKA_EXTRACTABLE)) return .{ .err = ck.CKR_KEY_UNEXTRACTABLE };
+    const sa = obj.findPtr(ck.CKA_VALUE) orelse return .{ .err = ck.CKR_KEY_NOT_WRAPPABLE };
+    if (sa.sealed) return .{ .err = ck.CKR_USER_NOT_LOGGED_IN };
+    return .{ .ok = sa.value };
 }
 
-pub fn C_DeriveKey(_: ck.CK_SESSION_HANDLE, _: *ck.CK_MECHANISM, _: ck.CK_OBJECT_HANDLE, _: ?[*]ck.CK_ATTRIBUTE, _: ck.CK_ULONG, _: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
-    return ck.CKR_FUNCTION_NOT_SUPPORTED;
+fn aesKekValue(inst: *state.Instance, hKey: ck.CK_OBJECT_HANDLE, usage: ck.CK_ATTRIBUTE_TYPE, handle_err: ck.CK_RV, type_err: ck.CK_RV, size_err: ck.CK_RV) SecretVal {
+    const obj = inst.objects.getPtr(hKey) orelse return .{ .err = handle_err };
+    if (!object_store.visible(obj, inst.logged_in)) return .{ .err = handle_err };
+    if (classOf(obj) != ck.CKO_SECRET_KEY or keyTypeOf(obj) != ck.CKK_AES) return .{ .err = type_err };
+    if (obj.has(usage) and !obj.getBool(usage)) return .{ .err = ck.CKR_KEY_FUNCTION_NOT_PERMITTED };
+    const sa = obj.findPtr(ck.CKA_VALUE) orelse return .{ .err = handle_err };
+    if (sa.sealed) return .{ .err = ck.CKR_USER_NOT_LOGGED_IN };
+    if (!cipher.validKeyLen(sa.value.len)) return .{ .err = size_err };
+    return .{ .ok = sa.value };
+}
+
+const RsaPubVal = union(enum) {
+    ok: rsa.PublicComponents,
+    err: ck.CK_RV,
+};
+
+fn rsaWrapPublic(inst: *state.Instance, hKey: ck.CK_OBJECT_HANDLE) RsaPubVal {
+    const obj = inst.objects.getPtr(hKey) orelse return .{ .err = ck.CKR_WRAPPING_KEY_HANDLE_INVALID };
+    if (!object_store.visible(obj, inst.logged_in)) return .{ .err = ck.CKR_WRAPPING_KEY_HANDLE_INVALID };
+    if (classOf(obj) != ck.CKO_PUBLIC_KEY or keyTypeOf(obj) != ck.CKK_RSA) return .{ .err = ck.CKR_WRAPPING_KEY_TYPE_INCONSISTENT };
+    if (obj.has(ck.CKA_WRAP) and !obj.getBool(ck.CKA_WRAP)) return .{ .err = ck.CKR_KEY_FUNCTION_NOT_PERMITTED };
+    return .{ .ok = .{
+        .n = obj.get(ck.CKA_MODULUS) orelse return .{ .err = ck.CKR_WRAPPING_KEY_HANDLE_INVALID },
+        .e = obj.get(ck.CKA_PUBLIC_EXPONENT) orelse return .{ .err = ck.CKR_WRAPPING_KEY_HANDLE_INVALID },
+    } };
+}
+
+const RsaPrivVal = union(enum) {
+    ok: rsa.PrivateComponents,
+    err: ck.CK_RV,
+};
+
+fn rsaUnwrapPrivate(inst: *state.Instance, hKey: ck.CK_OBJECT_HANDLE) RsaPrivVal {
+    const obj = inst.objects.getPtr(hKey) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID };
+    if (!object_store.visible(obj, inst.logged_in)) return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID };
+    if (classOf(obj) != ck.CKO_PRIVATE_KEY or keyTypeOf(obj) != ck.CKK_RSA) return .{ .err = ck.CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT };
+    if (obj.has(ck.CKA_UNWRAP) and !obj.getBool(ck.CKA_UNWRAP)) return .{ .err = ck.CKR_KEY_FUNCTION_NOT_PERMITTED };
+    if (obj.findPtr(ck.CKA_PRIVATE_EXPONENT)) |da| {
+        if (da.sealed) return .{ .err = ck.CKR_USER_NOT_LOGGED_IN };
+    }
+    return .{ .ok = .{
+        .n = obj.get(ck.CKA_MODULUS) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .e = obj.get(ck.CKA_PUBLIC_EXPONENT) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .d = obj.get(ck.CKA_PRIVATE_EXPONENT) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .p = obj.get(ck.CKA_PRIME_1) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .q = obj.get(ck.CKA_PRIME_2) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .dmp1 = obj.get(ck.CKA_EXPONENT_1) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .dmq1 = obj.get(ck.CKA_EXPONENT_2) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+        .iqmp = obj.get(ck.CKA_COEFFICIENT) orelse return .{ .err = ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID },
+    } };
+}
+
+fn mgfHash(mgf: ck.CK_RSA_PKCS_MGF_TYPE) ?rsa.Hash {
+    return switch (mgf) {
+        ck.CKG_MGF1_SHA256 => .sha256,
+        ck.CKG_MGF1_SHA384 => .sha384,
+        ck.CKG_MGF1_SHA512 => .sha512,
+        else => null,
+    };
+}
+
+const OaepVal = union(enum) {
+    ok: rsa.CryptParams,
+    err: ck.CK_RV,
+};
+
+fn oaepParams(pMechanism: *ck.CK_MECHANISM) OaepVal {
+    const p = pMechanism.pParameter orelse return .{ .err = ck.CKR_MECHANISM_PARAM_INVALID };
+    if (pMechanism.ulParameterLen != @sizeOf(ck.CK_RSA_PKCS_OAEP_PARAMS)) return .{ .err = ck.CKR_MECHANISM_PARAM_INVALID };
+    const op: *const ck.CK_RSA_PKCS_OAEP_PARAMS = @ptrCast(@alignCast(p));
+    const h = rsa.Hash.fromMech(op.hashAlg) orelse return .{ .err = ck.CKR_MECHANISM_PARAM_INVALID };
+    if (mgfHash(op.mgf) != h) return .{ .err = ck.CKR_MECHANISM_PARAM_INVALID };
+    if (op.ulSourceDataLen != 0) return .{ .err = ck.CKR_MECHANISM_PARAM_INVALID };
+    return .{ .ok = .{ .scheme = .oaep, .oaep_hash = h } };
+}
+
+pub fn C_WrapKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hWrappingKey: ck.CK_OBJECT_HANDLE, hKey: ck.CK_OBJECT_HANDLE, pWrappedKey: ?[*]ck.CK_BYTE, pulWrappedKeyLen: *ck.CK_ULONG) callconv(.c) ck.CK_RV {
+    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    state.mutex.lock();
+    defer state.mutex.unlock();
+    _ = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+
+    const target = switch (wrapTargetValue(inst, hKey)) {
+        .err => |rv| return rv,
+        .ok => |v| v,
+    };
+
+    switch (pMechanism.mechanism) {
+        ck.CKM_AES_KEY_WRAP => {
+            const kek = switch (aesKekValue(inst, hWrappingKey, ck.CKA_WRAP, ck.CKR_WRAPPING_KEY_HANDLE_INVALID, ck.CKR_WRAPPING_KEY_TYPE_INCONSISTENT, ck.CKR_WRAPPING_KEY_SIZE_RANGE)) {
+                .err => |rv| return rv,
+                .ok => |v| v,
+            };
+            if (target.len < 2 * cipher.key_wrap_overhead or target.len % cipher.key_wrap_overhead != 0) return ck.CKR_KEY_NOT_WRAPPABLE;
+            const need: ck.CK_ULONG = @intCast(target.len + cipher.key_wrap_overhead);
+            if (pWrappedKey == null) {
+                pulWrappedKeyLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulWrappedKeyLen.* < need) {
+                pulWrappedKeyLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = cipher.aesKeyWrap(kek, target, pWrappedKey.?[0..@intCast(need)]) catch return ck.CKR_FUNCTION_FAILED;
+            pulWrappedKeyLen.* = @intCast(n);
+            return ck.CKR_OK;
+        },
+        ck.CKM_RSA_PKCS_OAEP => {
+            const params = switch (oaepParams(pMechanism)) {
+                .err => |rv| return rv,
+                .ok => |p| p,
+            };
+            const pc = switch (rsaWrapPublic(inst, hWrappingKey)) {
+                .err => |rv| return rv,
+                .ok => |c| c,
+            };
+            const need: ck.CK_ULONG = @intCast(pc.n.len);
+            if (pWrappedKey == null) {
+                pulWrappedKeyLen.* = need;
+                return ck.CKR_OK;
+            }
+            if (pulWrappedKeyLen.* < need) {
+                pulWrappedKeyLen.* = need;
+                return ck.CKR_BUFFER_TOO_SMALL;
+            }
+            const n = rsa.encrypt(pc, params, target, pWrappedKey.?[0..@intCast(need)]) catch return ck.CKR_KEY_SIZE_RANGE;
+            pulWrappedKeyLen.* = @intCast(n);
+            return ck.CKR_OK;
+        },
+        else => return ck.CKR_MECHANISM_INVALID,
+    }
+}
+
+pub fn C_UnwrapKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hUnwrappingKey: ck.CK_OBJECT_HANDLE, pWrappedKey: [*]ck.CK_BYTE, ulWrappedKeyLen: ck.CK_ULONG, pTemplate: [*]ck.CK_ATTRIBUTE, ulAttributeCount: ck.CK_ULONG, phKey: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
+    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    state.mutex.lock();
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+
+    const wrapped = pWrappedKey[0..@intCast(ulWrappedKeyLen)];
+    const template = if (ulAttributeCount == 0) &[_]ck.CK_ATTRIBUTE{} else pTemplate[0..@intCast(ulAttributeCount)];
+
+    var buf: [rsa.max_modulus_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buf);
+
+    const recovered: []const u8 = switch (pMechanism.mechanism) {
+        ck.CKM_AES_KEY_WRAP => blk: {
+            const kek = switch (aesKekValue(inst, hUnwrappingKey, ck.CKA_UNWRAP, ck.CKR_UNWRAPPING_KEY_HANDLE_INVALID, ck.CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT, ck.CKR_UNWRAPPING_KEY_SIZE_RANGE)) {
+                .err => |rv| return rv,
+                .ok => |v| v,
+            };
+            if (wrapped.len < 3 * cipher.key_wrap_overhead or wrapped.len % cipher.key_wrap_overhead != 0) return ck.CKR_WRAPPED_KEY_LEN_RANGE;
+            if (wrapped.len - cipher.key_wrap_overhead > buf.len) return ck.CKR_WRAPPED_KEY_LEN_RANGE;
+            const n = cipher.aesKeyUnwrap(kek, wrapped, &buf) catch |e| switch (e) {
+                cipher.WrapError.Integrity => return ck.CKR_WRAPPED_KEY_INVALID,
+                else => return ck.CKR_WRAPPED_KEY_LEN_RANGE,
+            };
+            break :blk buf[0..n];
+        },
+        ck.CKM_RSA_PKCS_OAEP => blk: {
+            const params = switch (oaepParams(pMechanism)) {
+                .err => |rv| return rv,
+                .ok => |p| p,
+            };
+            const sc = switch (rsaUnwrapPrivate(inst, hUnwrappingKey)) {
+                .err => |rv| return rv,
+                .ok => |c| c,
+            };
+            const n = rsa.decrypt(sc, params, wrapped, &buf) catch return ck.CKR_WRAPPED_KEY_INVALID;
+            break :blk buf[0..n];
+        },
+        else => return ck.CKR_MECHANISM_INVALID,
+    };
+
+    var final = recovered;
+    for (template) |a| {
+        if (a.type == ck.CKA_VALUE_LEN) {
+            const v = ulongFrom(attrBytes(a)) orelse return ck.CKR_ATTRIBUTE_VALUE_INVALID;
+            const vlen: usize = @intCast(v);
+            if (vlen == 0 or vlen > recovered.len) return ck.CKR_ATTRIBUTE_VALUE_INVALID;
+            final = recovered[0..vlen];
+        }
+    }
+
+    return buildSecretKeyObject(inst, sess, template, final, false, false, phKey);
+}
+
+fn classOf(obj: *const Object) ?ck.CK_OBJECT_CLASS {
+    const v = obj.get(ck.CKA_CLASS) orelse return null;
+    if (v.len != @sizeOf(ck.CK_OBJECT_CLASS)) return null;
+    return std.mem.bytesToValue(ck.CK_OBJECT_CLASS, v[0..@sizeOf(ck.CK_OBJECT_CLASS)]);
+}
+
+fn keyTypeOf(obj: *const Object) ?ck.CK_KEY_TYPE {
+    const v = obj.get(ck.CKA_KEY_TYPE) orelse return null;
+    if (v.len != @sizeOf(ck.CK_KEY_TYPE)) return null;
+    return std.mem.bytesToValue(ck.CK_KEY_TYPE, v[0..@sizeOf(ck.CK_KEY_TYPE)]);
+}
+
+const EcDeriveBase = union(enum) {
+    ok: struct {
+        curve: ecdsa.Curve,
+        scalar: []const u8,
+        always_sensitive: bool,
+        never_extractable: bool,
+    },
+    err: ck.CK_RV,
+};
+
+fn ecDeriveBaseKey(inst: *state.Instance, hKey: ck.CK_OBJECT_HANDLE) EcDeriveBase {
+    const obj = inst.objects.getPtr(hKey) orelse return .{ .err = ck.CKR_KEY_HANDLE_INVALID };
+    if (!object_store.visible(obj, inst.logged_in)) return .{ .err = ck.CKR_KEY_HANDLE_INVALID };
+    if (classOf(obj) != ck.CKO_PRIVATE_KEY) return .{ .err = ck.CKR_KEY_TYPE_INCONSISTENT };
+    if (keyTypeOf(obj) != ck.CKK_EC) return .{ .err = ck.CKR_KEY_TYPE_INCONSISTENT };
+    if (obj.has(ck.CKA_DERIVE) and !obj.getBool(ck.CKA_DERIVE)) return .{ .err = ck.CKR_KEY_FUNCTION_NOT_PERMITTED };
+    const params = obj.get(ck.CKA_EC_PARAMS) orelse return .{ .err = ck.CKR_KEY_TYPE_INCONSISTENT };
+    const curve = ecdsa.curveFromParams(params) orelse return .{ .err = ck.CKR_KEY_TYPE_INCONSISTENT };
+    const sa = obj.findPtr(ck.CKA_VALUE) orelse return .{ .err = ck.CKR_KEY_HANDLE_INVALID };
+    if (sa.sealed) return .{ .err = ck.CKR_USER_NOT_LOGGED_IN };
+    if (sa.value.len != curve.scalarLen()) return .{ .err = ck.CKR_FUNCTION_FAILED };
+    return .{ .ok = .{
+        .curve = curve,
+        .scalar = sa.value,
+        .always_sensitive = obj.getBool(ck.CKA_ALWAYS_SENSITIVE),
+        .never_extractable = obj.getBool(ck.CKA_NEVER_EXTRACTABLE),
+    } };
+}
+
+fn peerPointSec1(curve: ecdsa.Curve, data: []const u8) ?[]const u8 {
+    if (data.len == curve.pointLen()) return data;
+    const inner = ecdsa.unwrapEcPoint(data) orelse return null;
+    if (inner.len == curve.pointLen()) return inner;
+    return null;
+}
+
+pub fn C_DeriveKey(hSession: ck.CK_SESSION_HANDLE, pMechanism: *ck.CK_MECHANISM, hBaseKey: ck.CK_OBJECT_HANDLE, pTemplate: ?[*]ck.CK_ATTRIBUTE, ulCount: ck.CK_ULONG, phKey: *ck.CK_OBJECT_HANDLE) callconv(.c) ck.CK_RV {
+    const inst = state.current() orelse return ck.CKR_CRYPTOKI_NOT_INITIALIZED;
+    state.mutex.lock();
+    defer state.mutex.unlock();
+    const sess = inst.sessions.get(hSession) orelse return ck.CKR_SESSION_HANDLE_INVALID;
+    if (pMechanism.mechanism != ck.CKM_ECDH1_DERIVE) return ck.CKR_MECHANISM_INVALID;
+
+    const p = pMechanism.pParameter orelse return ck.CKR_MECHANISM_PARAM_INVALID;
+    if (pMechanism.ulParameterLen != @sizeOf(ck.CK_ECDH1_DERIVE_PARAMS)) return ck.CKR_MECHANISM_PARAM_INVALID;
+    const dp: *const ck.CK_ECDH1_DERIVE_PARAMS = @ptrCast(@alignCast(p));
+    if (dp.kdf != ck.CKD_NULL) return ck.CKR_MECHANISM_PARAM_INVALID;
+    if (dp.ulSharedDataLen != 0) return ck.CKR_MECHANISM_PARAM_INVALID;
+    const peer = (dp.pPublicData orelse return ck.CKR_MECHANISM_PARAM_INVALID)[0..@intCast(dp.ulPublicDataLen)];
+
+    const base = switch (ecDeriveBaseKey(inst, hBaseKey)) {
+        .err => |rv| return rv,
+        .ok => |b| b,
+    };
+
+    const peer_sec1 = peerPointSec1(base.curve, peer) orelse return ck.CKR_MECHANISM_PARAM_INVALID;
+    var secret: [ecdsa.max_scalar]u8 = undefined;
+    defer std.crypto.secureZero(u8, &secret);
+    const slen = ecdsa.ecdh(base.curve, base.scalar, peer_sec1, &secret) catch return ck.CKR_FUNCTION_FAILED;
+
+    const template = if (ulCount == 0) &[_]ck.CK_ATTRIBUTE{} else (pTemplate orelse return ck.CKR_ARGUMENTS_BAD)[0..@intCast(ulCount)];
+
+    var value_len: usize = slen;
+    for (template) |a| {
+        if (a.type == ck.CKA_VALUE_LEN) {
+            const v = ulongFrom(attrBytes(a)) orelse return ck.CKR_ATTRIBUTE_VALUE_INVALID;
+            value_len = @intCast(v);
+        }
+    }
+    if (value_len == 0 or value_len > slen) return ck.CKR_ATTRIBUTE_VALUE_INVALID;
+
+    return buildSecretKeyObject(inst, sess, template, secret[0..value_len], base.always_sensitive, base.never_extractable, phKey);
 }

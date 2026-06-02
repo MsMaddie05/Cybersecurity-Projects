@@ -748,8 +748,10 @@ pub fn C_DigestKey(hSession: ck.CK_SESSION_HANDLE, hKey: ck.CK_OBJECT_HANDLE) ca
     if (sess.digest_op == null) return ck.CKR_OPERATION_NOT_INITIALIZED;
     const obj = inst.objects.getPtr(hKey) orelse return ck.CKR_KEY_HANDLE_INVALID;
     if (!object_store.visible(obj, inst.logged_in)) return ck.CKR_KEY_HANDLE_INVALID;
-    const val = obj.get(ck.CKA_VALUE) orelse return ck.CKR_KEY_HANDLE_INVALID;
-    sess.digest_op.?.update(val);
+    if (objectClass(obj) != ck.CKO_SECRET_KEY) return ck.CKR_KEY_INDIGESTIBLE;
+    const sa = obj.findPtr(ck.CKA_VALUE) orelse return ck.CKR_KEY_INDIGESTIBLE;
+    if (sa.sealed) return ck.CKR_USER_NOT_LOGGED_IN;
+    sess.digest_op.?.update(sa.value);
     return ck.CKR_OK;
 }
 
