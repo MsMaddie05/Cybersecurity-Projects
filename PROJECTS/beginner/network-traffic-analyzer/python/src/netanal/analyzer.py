@@ -30,6 +30,7 @@ from scapy.layers.inet import (
     TCP,
     UDP,
 )
+from scapy.layers.inet6 import IPv6
 from scapy.layers.l2 import ARP, Ether
 from scapy.packet import Packet
 from scapy.utils import PcapReader
@@ -62,6 +63,9 @@ def identify_protocol(packet: Packet) -> Protocol:
     if packet.haslayer(ICMP):
         return Protocol.ICMP
 
+    if packet.haslayer(IPv6):
+        return Protocol.IPV6
+
     if packet.haslayer(ARP):
         return Protocol.ARP
 
@@ -81,6 +85,7 @@ def extract_packet_info(packet: Packet) -> PacketInfo | None:
     dst_ip: str = DefaultIPs.UNKNOWN
     src_port: int | None = None
     dst_port: int | None = None
+    ip_v: int | None = None
 
     if packet.haslayer(Ether):
         ether_layer = packet[Ether]
@@ -91,6 +96,10 @@ def extract_packet_info(packet: Packet) -> PacketInfo | None:
         ip_layer = packet[IP]
         src_ip = ip_layer.src
         dst_ip = ip_layer.dst
+    elif packet.haslayer(IPv6):
+        ipv6_layer = packet[IPv6]
+        src_ip = ipv6_layer.src
+        dst_ip = ipv6_layer.dst
     elif packet.haslayer(ARP):
         arp_layer = packet[ARP]
         src_ip = arp_layer.psrc
@@ -119,6 +128,7 @@ def extract_packet_info(packet: Packet) -> PacketInfo | None:
         dst_port=dst_port,
         src_mac=src_mac,
         dst_mac=dst_mac,
+        ip_v = ip_v,
     )
 
 

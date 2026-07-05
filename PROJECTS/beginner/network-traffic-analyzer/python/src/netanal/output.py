@@ -29,7 +29,7 @@ Connects to:
 
 import os
 import sys
-
+from netanal.mac_lookup import lookup_manufacturer, OUI_DATABASE
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -99,6 +99,8 @@ def print_packet(packet: PacketInfo) -> None:
         f"{packet.src_ip:15} -> {packet.dst_ip:15} "
         f"{port_info:20} "
         f"[dim]{packet.size:6} bytes[/dim]"
+        f"{packet.src_mac} ({lookup_manufacturer(packet.src_mac, OUI_DATABASE)})"
+
     )
 
 

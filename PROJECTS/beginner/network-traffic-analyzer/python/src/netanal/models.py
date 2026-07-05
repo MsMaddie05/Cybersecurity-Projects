@@ -46,6 +46,7 @@ class Protocol(StrEnum):
     HTTPS = "HTTPS"
     ARP = "ARP"
     OTHER = "OTHER"
+    IPV6 = "IPv6"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,7 @@ class PacketInfo:
     dst_port: int | None = None
     src_mac: str | None = None
     dst_mac: str | None = None
+    ip_v: int | None = None
 
 
 @dataclass(slots=True)
