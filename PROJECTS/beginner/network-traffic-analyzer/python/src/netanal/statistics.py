@@ -23,6 +23,7 @@ import threading
 import time
 from collections import defaultdict
 
+from netanal.output import console
 from netanal.constants import CaptureDefaults
 from netanal.models import (
     BandwidthSample,
@@ -61,6 +62,7 @@ class StatisticsCollector:
         self._endpoints: dict[str, EndpointStats] = {}
         self._conversations: dict[tuple[str, str], ConversationStats] = {}
         self._bandwidth_samples: list[BandwidthSample] = []
+        self.bandwidth_Threshold = 1
 
     def start(self) -> None:
         """
@@ -148,6 +150,7 @@ class StatisticsCollector:
         if timestamp - self._last_sample_time >= self._bandwidth_interval:
             elapsed = timestamp - self._last_sample_time
             if elapsed > 0:
+                
                 bps = self._interval_bytes / elapsed
                 pps = self._interval_packets / elapsed
                 self._bandwidth_samples.append(
@@ -157,6 +160,11 @@ class StatisticsCollector:
                         packets_per_second=pps,
                     )
                 )
+
+            mbps = bps / (1024*1024)
+            if self.bandwidth_Threshold > 0 and mbps > self.bandwidth_Threshold:
+                console.print(f"[red]ALERT: Bandwidth exceeded threshold!" f"Current: {mbps:.2f} Mbps," f"Threshold: {self.bandwidth_Threshold:.2f} Mbps[/red]")            
+            
             self._interval_bytes = 0
             self._interval_packets = 0
             self._last_sample_time = timestamp

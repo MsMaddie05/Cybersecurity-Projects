@@ -186,7 +186,7 @@ class CaptureConfig:
     timeout_seconds: float | None = None
     promiscuous: bool = True
     store_packets: bool = False
-
+    alert_threshold: float | None = None
 
 @dataclass(frozen=True, slots=True)
 class ExportOptions:

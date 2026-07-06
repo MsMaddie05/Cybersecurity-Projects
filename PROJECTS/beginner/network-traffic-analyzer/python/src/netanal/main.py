@@ -175,6 +175,14 @@ def capture(
             help="Show individual packets",
         ),
     ] = False,
+    alert_threshold: Annotated[
+        float | None,
+        typer.Option(
+            "--alert-threshold",
+            "-a",
+            help="Alert if threshold surpasses given amount",
+        ),
+    ] = None,
 ) -> None:
     """
     [bold green]Capture[/bold green] live network packets
@@ -198,6 +206,7 @@ def capture(
         bpf_filter=filter_expr,
         packet_count=count,
         timeout_seconds=timeout,
+        alert_threshold = alert_threshold,
     )
 
     packets_captured: list[PacketInfo] = []
